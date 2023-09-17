@@ -1,0 +1,75 @@
+stages:
+  - test
+  - analyze_scans
+  - provisioning_infra
+include:
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  - template: Security/SAST.gitlab-ci.yml
+
+sast:
+  stage: test
+  tags:
+    - fusion-docker
+  artifacts:
+    paths:
+      - gl-sast-report.json
+  when: manual
+
+secret_detection:
+  tags:
+    - fusion-docker
+  when: manual
+  artifacts:
+    paths:
+      - gl-secret-detection-report.json
+  variables:
+    SECRET_DETECTION_HISTORIC_SCAN: "true"
+
+
+analyze_scans:
+  stage: analyze_scans
+  image: nexus.pitneycloud.com:8443/fusion-platform/awscli-docker:latest
+  tags:
+    - fusion-docker
+  when: manual
+  allow_failure: false
+  script:
+    - chmod +x script.sh
+    - ./script.sh gl-secret-detection-report.json
+    - ./script.sh gl-sast-report.json
+
+
+provisioning_infra:
+  image: python:3.10
+  stage: provisioning_infra
+  tags:
+    - fusion-docker
+  before_script:
+    # Set environment variables for AWS credentials and region
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+    - export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
+    - export envType=$env
+    - export TF_VAR_CLOUD_REGION=$AWS_DEFAULT_REGION
+  script:
+    # Change to the 'config' directory
+    - cd config
+    # Download and install Terraform
+    - wget https://releases.hashicorp.com/terraform/1.3.7/terraform_1.3.7_linux_amd64.zip
+    - unzip terraform_1.3.7_linux_amd64.zip
+    - mv terraform /usr/local/bin
+    # Display Terraform version
+    - terraform --version
+    # Initialize Terraform with backend configuration
+    - terraform init -backend-config="bucket=$BUCKET_NAME" -backend-config="key=terraform/${PROJECT_NAME}/${envType}/terraform.tfstate" -backend-config="region=$TF_VAR_CLOUD_REGION"
+    # Create an execution plan and save it to a file
+    - terraform plan -out "planfile"
+    # Apply the Terraform changes using the saved execution plan
+    - terraform apply -input=false "planfile"
+  environment:
+    # Set the environment name to the GitLab CI/CD branch or tag name
+    name: $CI_COMMIT_REF_NAME
+  when: manual # This stage should be triggered manually
+  dependencies:
+    - analyze_scans
+
